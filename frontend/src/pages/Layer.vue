@@ -1,7 +1,9 @@
 <template>
   <div>
-    <h1>{{ props.layer }} 层 · 干跑页画过期</h1>
-    <span v-for="x in rows" :key="x.id" class="lot">{{ x.name }} ×{{ x.qty_remain }} · {{ x.expiry }}</span>
+    <h1>{{ props.layer }} 层 · 虚线为干跑名单（仍在架）</h1>
+    <span v-for="x in rows" :key="x.id" class="lot" :class="{ 'lot-pending': x.will_sweep }">
+      {{ x.name }} ×{{ x.qty_remain }} · {{ x.expiry }}<em v-if="x.will_sweep" class="tag">待下架</em>
+    </span>
   </div>
 </template>
 <script setup>

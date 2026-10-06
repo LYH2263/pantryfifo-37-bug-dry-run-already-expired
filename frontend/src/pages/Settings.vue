@@ -1,6 +1,6 @@
 <template>
   <div>
-    <h1>设置 · 干跑页画过期</h1>
+    <h1>设置 · 干跑只钉名单</h1>
     <pre>{{ s }}</pre>
   </div>
 </template>

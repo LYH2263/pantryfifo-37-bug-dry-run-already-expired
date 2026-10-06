@@ -27,6 +27,9 @@ h1,h2 { font-family: "Space Grotesk", sans-serif; }
 .shelf h3 { margin: 0 0 8px; font-size: 14px; color: var(--teal); }
 .lot { display: inline-block; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin: 4px; }
 .lot-expired { border-color: #e2a07a; background: #fff3ea; color: var(--alert); }
+/* pinned in a dry-run generation: factually still on_shelf, merely marked for removal */
+.lot-pending { border: 1px dashed #d5912b; background: #fff8e8; }
+.tag { font-style: normal; font-size: 11px; margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: #f0c169; color: #5c3d05; }
 .btn-ghost { background: #fff; color: var(--teal); border: 1px solid var(--line); }
 .sweep-card {
   margin-top: 14px; background: #fff; border: 1px solid var(--line); border-left: 4px solid var(--alert);
