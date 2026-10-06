@@ -30,7 +30,7 @@ def fridge(layer: str | None = None):
     if layer:
         q += " AND items.layer=?"; args.append(layer)
     rows = [dict(r) for r in c.execute(q, args)]
-    rows = dry_overlay.paint_fridge(rows, dry_overlay.load_preview_ids(c))
+    rows = dry_overlay.paint_fridge(rows, dry_overlay.load_preview(c))
     c.close(); return rows
 
 @app.get("/api/alerts")
@@ -41,6 +41,8 @@ def alerts():
     rows = [dict(r) for r in c.execute(
         """SELECT lots.*, items.name, items.layer FROM lots JOIN items ON items.id=lots.item_id
            WHERE status='on_shelf' AND qty_remain>0 AND expiry IS NOT NULL""")]
+    # the alert bar reads the same open generation as the master table
+    rows = dry_overlay.paint_alerts(rows, dry_overlay.load_preview(c))
     c.close()
     out = []
     for r in rows:
@@ -104,7 +106,7 @@ def consume(body: ConsumeIn):
     c.close(); return result
 
 def _sweep_candidates(c, today: str) -> list[dict]:
-    """Commit-time generation: still on_shelf, with stock, expiry strictly before today."""
+    """Truth at read time: still on_shelf, with stock, expiry strictly before today."""
     return [dict(r) for r in c.execute(
         """SELECT lots.id, lots.item_id, lots.qty_remain, lots.expiry, items.name, items.layer
            FROM lots JOIN items ON items.id=lots.item_id
@@ -113,57 +115,81 @@ def _sweep_candidates(c, today: str) -> list[dict]:
 
 @app.get("/api/expire-sweep/preview")
 def expire_sweep_preview():
-    """Dry run: read-only. Lists lots expired before today that are still on the shelf."""
+    """Dry run: read-only on lots. Lists lots expired before today that are
+    still on the shelf, and opens a generation (the pinned id list) that the
+    master table / layer pages / alert bar all render until commit or cancel.
+    Listed lots are 待下架, NOT yet expired."""
     today = date.today().isoformat()
     c = connect()
     lots = _sweep_candidates(c, today)
-    dry_overlay.save_preview(c, [l["id"] for l in lots])
+    dry_overlay.save_preview(c, today, [l["id"] for l in lots])
     c.close()
-    painted = list(lots)
-    for l in painted:
-        l["status"] = "expired"
-    return {"as_of": today, "lots": painted}
+    for l in lots:
+        l["sweep_pending"] = True
+    return {"as_of": today, "lots": lots}
+
+@app.delete("/api/expire-sweep/preview")
+def expire_sweep_preview_cancel():
+    """Abandon the open generation: overlay clears, all views return to the
+    base generation together."""
+    c = connect()
+    dry_overlay.clear_preview(c)
+    c.commit(); c.close()
+    return {"ok": True}
 
 class SweepIn(BaseModel):
     ids: list[int] | None = None
 
 @app.post("/api/expire-sweep")
 def expire_sweep(body: SweepIn | None = None):
-    """Commit the sweep.
+    """Commit exactly the pinned dry-run generation — never a recompute.
 
-    The list is recomputed inside one IMMEDIATE transaction against the
-    commit-time generation, so a lot inserted (already expired) after the dry
-    run is not missed and a lot consumed meanwhile is not marked expired.
-    UPDATE is guarded by status='on_shelf' AND qty_remain>0 so a second commit
-    never rewrites an already expired lot. Any failure rolls the whole
-    transaction back; full-layer / layer-page / alert-bar read the same DB and
-    therefore return to the pre-commit generation together.
+    The list swept is the one the dry run listed and the master table showed
+    as 待下架; a lot inbound'ed (already expired) after the dry run is NOT
+    taken — it waits for the next generation. Pinned ids are revalidated
+    inside one IMMEDIATE transaction (still on_shelf, qty_remain>0, expiry
+    strictly before today), so a lot consumed meanwhile is left alone and an
+    unexpired lot can never be taken. The generation is cleared in the SAME
+    transaction, so any failure rolls lots + overlay back together and every
+    view returns to the pre-commit generation as one. With the generation
+    consumed, a second submit gets 409 — an already expired lot is never
+    rewritten (the UPDATE's status guard is the backstop).
     """
-    preview_ids = set((body.ids if body and body.ids is not None else []))
     today = date.today().isoformat()
     c = connect()
     c.isolation_level = None  # explicit transaction control
     try:
         c.execute("BEGIN IMMEDIATE")
-        current_ids = [l["id"] for l in _sweep_candidates(c, today)]
-        if current_ids:
-            marks = ",".join("?" for _ in current_ids)
+        gen = dry_overlay.load_preview(c)
+        if gen is None:
+            c.rollback()
+            raise HTTPException(409, "no_open_preview")
+        pinned = gen["ids"]
+        if body and body.ids is not None and set(body.ids) != pinned:
+            c.rollback()
+            raise HTTPException(409, "generation_mismatch")
+        sweepable = {l["id"] for l in _sweep_candidates(c, today)}
+        take = sorted(pinned & sweepable)
+        gone = sorted(pinned - sweepable)  # left the shelf meanwhile — untouched
+        if take:
+            marks = ",".join("?" for _ in take)
             c.execute(
                 f"UPDATE lots SET status='expired' "
                 f"WHERE id IN ({marks}) AND status='on_shelf' AND qty_remain>0",
-                current_ids)
+                take)
+        left_unswept = sorted(sweepable - pinned)  # reported, never taken
+        dry_overlay.clear_preview(c)  # same tx: rollback restores the overlay too
         c.commit()
+    except HTTPException:
+        c.close(); raise
     except Exception:
-        c.rollback()
-        c.close()
-        raise
-    current_set = set(current_ids)
+        c.rollback(); c.close(); raise
     c.close()
     return {
         "as_of": today,
-        "expired_ids": current_ids,
-        "added_after_preview": sorted(current_set - preview_ids),
-        "gone_after_preview": sorted(preview_ids - current_set),
+        "expired_ids": take,
+        "gone_after_preview": gone,
+        "left_unswept": left_unswept,
     }
 
 @app.get("/api/settings")
